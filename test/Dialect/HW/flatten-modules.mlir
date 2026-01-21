@@ -90,3 +90,20 @@ hw.module private @ExtModuleB() {
   hw.instance "c1" @ExtModuleC() -> ()
 }
 hw.module.extern private @ExtModuleC()
+
+// CHECK-LABEL: hw.module @UseParameterized
+// CHECK: hw.param.value i42 = 4
+// CHECK: hw.param.value i42 = 11
+// CHECK: hw.param.value i42 = 17
+// CHECK: hw.output %{{.*}}, %{{.*}}, %{{.*}} : i42, i42, i42
+hw.module private @parameters<p1: i42 = 17>(out out: i42) {
+  %result = hw.param.value i42 = #hw.param.decl.ref<"p1">
+  hw.output %result: i42
+}
+
+hw.module @UseParameterized(out x: i42, out y: i42, out z: i42) {
+  %r0 = hw.instance "inst1" @parameters<p1: i42 = 4>() -> (out: i42)
+  %r1 = hw.instance "inst2" @parameters<p1: i42 = 11>() -> (out: i42)
+  %r2 = hw.instance "inst3" @parameters<p1: i42 = 17>() -> (out: i42)
+  hw.output %r0, %r1, %r2: i42, i42, i42
+}

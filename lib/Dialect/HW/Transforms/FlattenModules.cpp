@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Dialect/HW/HWInstanceGraph.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWPasses.h"
@@ -159,7 +160,8 @@ struct PrefixingInliner : public InlinerInterface {
     }
 
     // Apply attribute replacements for InnerRefAttr
-    replacer->replaceElementsIn(op);
+    replacer->replaceElementsIn(op, /*replaceAttrs=*/true, /*replaceLocs=*/false,
+                                /*replaceTypes=*/true);
   }
 
   bool allowSingleBlockOptimization(
@@ -296,7 +298,7 @@ void FlattenModulesPass::runOnOperation() {
               {oldSym, StringAttr::get(&getContext(),
                                        nsPtr->newName(oldSym.getValue()))});
 
-        // Setup the replacer for InnerRefAttr
+        // Setup the replacer for InnerRefAttr and parameter evaluation.
         mlir::AttrTypeReplacer instanceReplacer;
         instanceReplacer.addReplacement(
             [&](InnerRefAttr attr) -> std::pair<Attribute, WalkResult> {
@@ -310,6 +312,46 @@ void FlattenModulesPass::runOnOperation() {
               auto newAttr = InnerRefAttr::get(parentModule.getModuleNameAttr(),
                                                it->second);
               return {newAttr, WalkResult::skip()};
+            });
+
+        // Evaluate parametric attributes and types using the instance's
+        // parameter values. Bail out if evaluation fails.
+        bool paramEvalFailed = false;
+        auto evalParamAttr =
+            [&](TypedAttr attr) -> std::optional<std::pair<Attribute, WalkResult>> {
+          if (!isa<hw::ParamDeclRefAttr, hw::ParamExprAttr>(attr))
+            return std::nullopt;
+
+          auto evaluated = evaluateParametricAttr(inst.getLoc(),
+                                                  inst.getParameters(), attr,
+                                                  /*emitErrors=*/true);
+          if (failed(evaluated)) {
+            paramEvalFailed = true;
+            return std::make_pair(attr, WalkResult::interrupt());
+          }
+          return std::make_pair(static_cast<Attribute>(*evaluated),
+                                WalkResult::skip());
+        };
+
+        instanceReplacer.addReplacement(
+            [&, evalParamAttr](Attribute attr)
+                -> std::optional<std::pair<Attribute, WalkResult>> {
+              if (auto typed = dyn_cast<TypedAttr>(attr))
+                return evalParamAttr(typed);
+              return std::nullopt;
+            });
+
+        instanceReplacer.addReplacement(
+            [&](Type type)
+                -> std::optional<std::pair<Type, WalkResult>> {
+              auto evaluated = evaluateParametricType(inst.getLoc(),
+                                                      inst.getParameters(), type,
+                                                      /*emitErrors=*/true);
+              if (failed(evaluated)) {
+                paramEvalFailed = true;
+                return std::make_pair(type, WalkResult::interrupt());
+              }
+              return std::make_pair(*evaluated, WalkResult::skip());
             });
 
         // Get the instance's inner reference if it has one
@@ -331,6 +373,9 @@ void FlattenModulesPass::runOnOperation() {
               << inst.getInstanceName() << "'";
           return signalPassFailure();
         }
+
+        if (paramEvalFailed)
+          return signalPassFailure();
 
         inst.erase();
         if (isLastModuleUse)
